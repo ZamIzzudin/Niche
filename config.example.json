@@ -1,1 +1,6 @@
-{"base_url":"BASE_URL","api_key":"API_KEY","model":"MODEL_NAME"}
+{
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "$NICHE_API_KEY",
+  "model": "gpt-4o",
+  "system_prompt": "You are a helpful assistant."
+}

@@ -1,23 +1,32 @@
 use super::config::Config;
-use super::types::{ApiError, ChatRequest, ChatResponse, Message};
+use super::types::{ApiError, ChatRequest, Message, StreamChunk};
+use futures_util::StreamExt;
 
 pub struct Client {
-    http: reqwest::blocking::Client,
+    http: reqwest::Client,
     config: Config,
 }
 
 impl Client {
     pub fn new(config: Config) -> Self {
         Self {
-            http: reqwest::blocking::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(300))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             config,
         }
     }
 
-    pub fn chat(&self, messages: &[Message]) -> Result<String, ApiError> {
+    pub async fn chat_stream(
+        &self,
+        messages: &[Message],
+        mut on_token: impl FnMut(&str),
+    ) -> Result<String, ApiError> {
         let request_body = ChatRequest {
             model: self.config.model.clone(),
             messages: messages.to_vec(),
+            stream: Some(true),
         };
 
         let url = format!(
@@ -29,25 +38,49 @@ impl Client {
             .http
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .timeout(std::time::Duration::from_secs(120))
             .json(&request_body)
             .send()
+            .await
             .map_err(|e| ApiError::Request(e.to_string()))?;
 
         let status = response.status();
-        let body_text = response.text().unwrap_or_default();
-
         if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
             return Err(ApiError::Status(status.as_u16(), body_text));
         }
 
-        let chat_resp: ChatResponse =
-            serde_json::from_str(&body_text).map_err(|e| ApiError::Parse(e.to_string(), body_text.clone()))?;
+        let mut full_response = String::new();
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
 
-        chat_resp
-            .choices
-            .first()
-            .map(|c| c.message.content.clone())
-            .ok_or_else(|| ApiError::Parse("empty choices".into(), body_text))
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(|e| ApiError::Request(e.to_string()))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim().to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if data == "[DONE]" {
+                        return Ok(full_response);
+                    }
+
+                    match serde_json::from_str::<StreamChunk>(data) {
+                        Ok(parsed) => {
+                            if let Some(choice) = parsed.choices.first() {
+                                if let Some(content) = &choice.delta.content {
+                                    on_token(content);
+                                    full_response.push_str(content);
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+
+        Ok(full_response)
     }
 }

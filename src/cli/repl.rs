@@ -1,4 +1,3 @@
-use crate::cli::spinner::Spinner;
 use crate::core::client::Client;
 use crate::core::types::Message;
 use std::io::{self, Write};
@@ -9,15 +8,16 @@ pub struct Repl {
 }
 
 impl Repl {
-    pub fn new(client: Client) -> Self {
-        Self {
-            client,
-            history: Vec::new(),
+    pub fn new(client: Client, system_prompt: Option<String>) -> Self {
+        let mut history = Vec::new();
+        if let Some(sp) = system_prompt {
+            history.push(Message::system(sp));
         }
+        Self { client, history }
     }
 
-    pub fn run(&mut self) {
-        println!("niche CLI - Interactive REPL");
+    pub async fn run(&mut self) {
+        println!("niche v{} - Interactive REPL", env!("CARGO_PKG_VERSION"));
         println!("Type 'exit' or press Ctrl+C to quit.");
         println!();
 
@@ -42,17 +42,27 @@ impl Repl {
 
             self.history.push(Message::user(input));
 
-            let sp = Spinner::start("thinking...");
-            let result = self.client.chat(&self.history);
-            sp.stop();
+            let result = self
+                .client
+                .chat_stream(&self.history, |token| {
+                    print!("{token}");
+                    io::stdout().flush().unwrap_or(());
+                })
+                .await;
+
+            println!("\n");
 
             match result {
                 Ok(content) => {
-                    println!("{content}\n");
-                    self.history.push(Message::assistant(content));
+                    if content.trim().is_empty() {
+                        eprintln!("(empty response)\n");
+                        self.history.pop();
+                    } else {
+                        self.history.push(Message::assistant(content));
+                    }
                 }
                 Err(e) => {
-                    eprintln!("{e}\n");
+                    eprintln!("Error: {e}\n");
                     self.history.pop();
                 }
             }

@@ -33,22 +33,32 @@ impl Message {
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+}
+
+/// Streaming SSE chunk from the API.
+#[derive(Deserialize)]
+pub struct StreamChunk {
+    pub choices: Vec<StreamChoice>,
 }
 
 #[derive(Deserialize)]
-pub struct ChatResponse {
-    pub choices: Vec<Choice>,
+pub struct StreamChoice {
+    pub delta: Delta,
 }
 
 #[derive(Deserialize)]
-pub struct Choice {
-    pub message: Message,
+pub struct Delta {
+    #[serde(default)]
+    pub content: Option<String>,
 }
 
 #[derive(Debug)]
 pub enum ApiError {
     Request(String),
     Status(u16, String),
+    #[allow(dead_code)]
     Parse(String, String),
 }
 
