@@ -1,6 +1,8 @@
 use super::commands::{handle_slash_command, CommandResult};
 use super::file_ref::expand_file_refs;
+use crate::core::agent::run_agent_turn;
 use crate::core::client::Client;
+use crate::core::tools::{read_file::ReadFileTool, list_files::ListFilesTool, run_command::RunCommandTool, write_file::WriteFileTool, ToolRegistry};
 use crate::core::types::Message;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -8,18 +10,34 @@ use std::io::{self, Write};
 
 const HISTORY_FILE: &str = ".niche_history";
 
+const DEFAULT_SYSTEM_PROMPT: &str = "You are Niche, an intelligent coding assistant. You help users with software development tasks including writing, reviewing, refactoring, and debugging code.
+
+You have access to tools: read_file, write_file, list_files, run_command.
+
+Rules:
+1. Always read a file before editing it - never guess its contents.
+2. Use list_files to explore project structure before assuming paths.
+3. Be concise in explanations. Show the result, not the process.
+4. When a task requires file changes, use write_file to make them directly.
+5. When uncertain, ask for clarification rather than guessing.";
+
 pub struct Repl {
     client: Client,
+    tools: ToolRegistry,
     history: Vec<Message>,
     rl: DefaultEditor,
 }
 
 impl Repl {
     pub fn new(client: Client, system_prompt: Option<String>) -> Self {
-        let mut history = Vec::new();
-        if let Some(sp) = system_prompt {
-            history.push(Message::system(sp));
-        }
+        let prompt = system_prompt.unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+        let history = vec![Message::system(prompt)];
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(ReadFileTool));
+        tools.register(Box::new(WriteFileTool));
+        tools.register(Box::new(ListFilesTool));
+        tools.register(Box::new(RunCommandTool));
 
         let mut rl = DefaultEditor::new().unwrap_or_else(|e| {
             eprintln!("Warning: failed to initialize line editor: {e}");
@@ -30,6 +48,7 @@ impl Repl {
 
         Self {
             client,
+            tools,
             history,
             rl,
         }
@@ -82,29 +101,17 @@ impl Repl {
             print!("\n");
             let _ = io::stdout().flush();
 
-            let result = self
-                .client
-                .chat_stream(&self.history, |token| {
-                    print!("{token}");
-                    let _ = io::stdout().flush();
-                })
-                .await;
+            let result = run_agent_turn(&self.client, &self.tools, &mut self.history, |token| {
+                print!("{token}");
+                let _ = io::stdout().flush();
+            })
+            .await;
 
             println!("\n");
 
-            match result {
-                Ok(content) => {
-                    if content.trim().is_empty() {
-                        eprintln!("(empty response)\n");
-                        self.history.pop();
-                    } else {
-                        self.history.push(Message::assistant(content));
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Error: {e}\n");
-                    self.history.pop();
-                }
+            if let Err(e) = result {
+                eprintln!("Error: {e}\n");
+                self.history.pop();
             }
         }
 
@@ -150,7 +157,8 @@ impl Repl {
     }
 
     fn print_banner(&self) {
-        println!("niche v{} - Interactive REPL", env!("CARGO_PKG_VERSION"));
+        println!("niche v{} - Agentic REPL", env!("CARGO_PKG_VERSION"));
+        println!("Tools: read_file, write_file, list_files, run_command");
         println!("Type /help for commands. Ctrl+D or /exit to quit.");
         println!();
     }

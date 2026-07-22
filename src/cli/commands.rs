@@ -80,10 +80,11 @@ fn print_history(history: &[Message]) {
             "assistant" => "niche",
             _ => "System",
         };
-        let preview = if msg.content.len() > 100 {
-            format!("{}...", &msg.content[..97])
+        let content = msg.content.as_deref().unwrap_or("(tool call)");
+        let preview = if content.len() > 100 {
+            format!("{}...", &content[..97])
         } else {
-            msg.content.clone()
+            content.to_string()
         };
         let preview = preview.replace('\n', " ");
         println!("  {}. [{}] {}", i + 1, label, preview);

@@ -1,10 +1,20 @@
 use super::config::Config;
-use super::types::{ApiError, ChatRequest, Message, StreamChunk};
+use super::types::{
+    ApiError, ChatRequest, Message, StreamChunk, ToolCall, ToolCallFunction, ToolDefinition,
+};
 use futures_util::StreamExt;
+use std::collections::BTreeMap;
 
 pub struct Client {
     http: reqwest::Client,
     config: Config,
+}
+
+pub struct StreamResult {
+    pub content: String,
+    pub tool_calls: Vec<ToolCall>,
+    #[allow(dead_code)]
+    pub finish_reason: Option<String>,
 }
 
 impl Client {
@@ -21,11 +31,13 @@ impl Client {
     pub async fn chat_stream(
         &self,
         messages: &[Message],
+        tools: &[ToolDefinition],
         mut on_token: impl FnMut(&str),
-    ) -> Result<String, ApiError> {
+    ) -> Result<StreamResult, ApiError> {
         let request_body = ChatRequest {
             model: self.config.model.clone(),
             messages: messages.to_vec(),
+            tools: tools.to_vec(),
             stream: Some(true),
         };
 
@@ -37,7 +49,10 @@ impl Client {
         let response = self
             .http
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.config.api_key),
+            )
             .json(&request_body)
             .send()
             .await
@@ -50,6 +65,10 @@ impl Client {
         }
 
         let mut full_response = String::new();
+        let mut finish_reason: Option<String> = None;
+
+        let mut tool_accum: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
+
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
 
@@ -61,9 +80,13 @@ impl Client {
                 let line = buffer[..newline_pos].trim().to_string();
                 buffer = buffer[newline_pos + 1..].to_string();
 
+                if line.is_empty() {
+                    continue;
+                }
+
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" {
-                        return Ok(full_response);
+                        break;
                     }
 
                     match serde_json::from_str::<StreamChunk>(data) {
@@ -73,6 +96,28 @@ impl Client {
                                     on_token(content);
                                     full_response.push_str(content);
                                 }
+
+                                if let Some(fr) = &choice.finish_reason {
+                                    finish_reason = Some(fr.clone());
+                                }
+
+                                for tc in &choice.delta.tool_calls {
+                                    let entry = tool_accum
+                                        .entry(tc.index)
+                                        .or_insert_with(|| (String::new(), String::new(), String::new()));
+
+                                    if let Some(id) = &tc.id {
+                                        entry.0 = id.clone();
+                                    }
+                                    if let Some(func) = &tc.function {
+                                        if let Some(name) = &func.name {
+                                            entry.1 = name.clone();
+                                        }
+                                        if let Some(args) = &func.arguments {
+                                            entry.2.push_str(args);
+                                        }
+                                    }
+                                }
                             }
                         }
                         Err(_) => {}
@@ -81,6 +126,22 @@ impl Client {
             }
         }
 
-        Ok(full_response)
+        let tool_calls: Vec<ToolCall> = tool_accum
+            .into_iter()
+            .map(|(_, (id, name, args))| ToolCall {
+                id,
+                call_type: "function".into(),
+                function: ToolCallFunction {
+                    name,
+                    arguments: args,
+                },
+            })
+            .collect();
+
+        Ok(StreamResult {
+            content: full_response,
+            tool_calls,
+            finish_reason,
+        })
     }
 }
