@@ -7,6 +7,26 @@ pub struct Config {
     pub model: String,
     #[serde(default)]
     pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub models: Vec<ModelEntry>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct ModelEntry {
+    pub name: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+/// Resolved model config: the actual values to use for an API call.
+#[derive(Clone, Debug)]
+pub struct ActiveModel {
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
 }
 
 impl Config {
@@ -26,8 +46,31 @@ impl Config {
         if let Some(ref sp) = config.system_prompt {
             config.system_prompt = Some(resolve_env(sp));
         }
+        for m in &mut config.models {
+            if let Some(ref key) = m.api_key {
+                m.api_key = Some(resolve_env(key));
+            }
+            if let Some(ref url) = m.base_url {
+                m.base_url = Some(resolve_env(url));
+            }
+        }
 
         config
+    }
+
+    /// Resolve the active model config from the current `model` field.
+    /// If `model` matches an entry in `models`, use that entry's overrides.
+    pub fn active_model(&self) -> ActiveModel {
+        let entry = self.models.iter().find(|m| m.name == self.model);
+        ActiveModel {
+            name: self.model.clone(),
+            base_url: entry
+                .and_then(|m| m.base_url.clone())
+                .unwrap_or_else(|| self.base_url.clone()),
+            api_key: entry
+                .and_then(|m| m.api_key.clone())
+                .unwrap_or_else(|| self.api_key.clone()),
+        }
     }
 }
 

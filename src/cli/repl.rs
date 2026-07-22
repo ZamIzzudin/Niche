@@ -1,8 +1,13 @@
-use super::commands::{handle_slash_command, CommandResult};
+use super::commands::{handle_slash_command, CommandContext, CommandResult};
 use super::file_ref::expand_file_refs;
+use super::session::SessionManager;
 use crate::core::agent::run_agent_turn;
 use crate::core::client::Client;
-use crate::core::tools::{read_file::ReadFileTool, list_files::ListFilesTool, run_command::RunCommandTool, write_file::WriteFileTool, edit_file::EditFileTool, grep::GrepTool, glob_tool::GlobTool, ToolRegistry};
+use crate::core::tools::{
+    edit_file::EditFileTool, glob_tool::GlobTool, grep::GrepTool, list_files::ListFilesTool,
+    read_file::ReadFileTool, run_command::RunCommandTool, write_file::WriteFileTool,
+    ToolRegistry,
+};
 use crate::core::types::Message;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -27,12 +32,13 @@ pub struct Repl {
     tools: ToolRegistry,
     history: Vec<Message>,
     rl: DefaultEditor,
+    sessions: SessionManager,
 }
 
 impl Repl {
     pub fn new(client: Client, system_prompt: Option<String>) -> Self {
         let prompt = system_prompt.unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
-        let history = vec![Message::system(prompt)];
+        let mut history = vec![Message::system(prompt)];
 
         let mut tools = ToolRegistry::new();
         tools.register(Box::new(ReadFileTool));
@@ -50,11 +56,30 @@ impl Repl {
 
         let _ = rl.load_history(HISTORY_FILE);
 
+        // Session: try resume latest, else start new
+        let mut sessions = SessionManager::new();
+        let active_model = client.active_model().name;
+        match SessionManager::load_latest() {
+            Some(latest) => {
+                let title = latest.title.clone();
+                let msg_count = latest.messages.iter().filter(|m| m.role != "system").count();
+                history = latest.messages.clone();
+                sessions.current = Some(latest);
+                eprintln!(
+                    "Resumed session: {title} ({msg_count} messages)\n  /new for fresh session | /sessions to browse\n"
+                );
+            }
+            None => {
+                sessions.start_new(&active_model, history.clone());
+            }
+        }
+
         Self {
             client,
             tools,
             history,
             rl,
+            sessions,
         }
     }
 
@@ -62,7 +87,8 @@ impl Repl {
         self.print_banner();
 
         loop {
-            let readline = self.rl.readline("> ");
+            let prompt = self.prompt_string();
+            let readline = self.rl.readline(&prompt);
             let line = match readline {
                 Ok(l) => l,
                 Err(ReadlineError::Interrupted) => {
@@ -88,7 +114,12 @@ impl Repl {
             }
 
             if line.starts_with('/') {
-                if let Some(CommandResult::Exit) = handle_slash_command(line, &mut self.history) {
+                let mut ctx = CommandContext {
+                    history: &mut self.history,
+                    client: &self.client,
+                    session: &mut self.sessions,
+                };
+                if let Some(CommandResult::Exit) = handle_slash_command(line, &mut ctx) {
                     break;
                 }
                 continue;
@@ -117,10 +148,30 @@ impl Repl {
                 eprintln!("Error: {e}\n");
                 self.history.pop();
             }
+
+            // Auto-save session
+            if let Some(session) = self.sessions.current_mut() {
+                session.messages = self.history.clone();
+                session.model = self.client.active_model().name;
+            }
+            self.sessions.save();
         }
 
+        // Save session on exit
+        self.sessions.save();
         let _ = self.rl.save_history(HISTORY_FILE);
         println!("Bye!");
+    }
+
+    fn prompt_string(&self) -> String {
+        let model = self.client.active_model().name;
+        let short_model: String = model.split('/').last().unwrap_or(&model).to_string();
+        let model_display: String = if short_model.len() > 20 {
+            format!("{}...", &short_model[..17])
+        } else {
+            short_model
+        };
+        format!("niche({model_display})> ")
     }
 
     fn read_multiline(&mut self, first_line: &str) -> Option<String> {
@@ -161,7 +212,15 @@ impl Repl {
     }
 
     fn print_banner(&self) {
+        let active = self.client.active_model();
+        let models = self.client.available_models();
+
         println!("niche v{} - Agentic REPL", env!("CARGO_PKG_VERSION"));
+        println!("Model: {}", active.name);
+        if !models.is_empty() {
+            let names: Vec<&str> = models.iter().map(|(n, _, _)| *n).collect();
+            println!("Available: {}", names.join(", "));
+        }
         println!("Tools: read_file, write_file, edit_file, list_files, grep, glob, run_command");
         println!("Type /help for commands. Ctrl+D or /exit to quit.");
         println!();

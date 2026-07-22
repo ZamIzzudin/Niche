@@ -2,5 +2,9 @@
   "base_url": "https://api.openai.com/v1",
   "api_key": "$NICHE_API_KEY",
   "model": "gpt-4o",
+  "models": [
+    {"name": "gpt-4o", "display_name": "GPT-4o"},
+    {"name": "gpt-4o-mini", "display_name": "GPT-4o Mini"}
+  ],
   "system_prompt": "You are a helpful assistant."
 }
