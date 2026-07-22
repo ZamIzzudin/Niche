@@ -39,20 +39,42 @@ pub async fn run_agent_turn(
             println!();
         }
 
-        for tc in &result.tool_calls {
-            print_tool_call(&tc.function.name, &tc.function.arguments);
-            let _ = io::stdout().flush();
+        // Build batch for execution
+        let batch: Vec<(String, String, serde_json::Value)> = result
+            .tool_calls
+            .iter()
+            .map(|tc| {
+                let args: serde_json::Value =
+                    serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::Value::Null);
+                (tc.id.clone(), tc.function.name.clone(), args)
+            })
+            .collect();
 
-            let args: serde_json::Value =
-                serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::Value::Null);
+        let batch_size = batch.len();
+        if batch_size > 1 {
+            let readonly_count = batch.iter().filter(|(_, name, _)| is_read_only(name)).count();
+            if readonly_count > 1 {
+                eprintln!(
+                    "\n  [batch] {readonly_count} read-only tools running concurrently + {} sequential",
+                    batch_size - readonly_count
+                );
+            }
+        }
 
-            let tool_result = match tools.execute(&tc.function.name, &args) {
-                Ok(output) => output,
-                Err(e) => format!("Error: {e}"),
-            };
+        for (name, args_str) in result
+            .tool_calls
+            .iter()
+            .map(|tc| (tc.function.name.as_str(), tc.function.arguments.as_str()))
+        {
+            print_tool_call(name, args_str);
+        }
+        let _ = io::stdout().flush();
 
-            print_tool_result(&tool_result);
-            history.push(Message::tool_result(tc.id.clone(), tool_result));
+        let results = tools.execute_batch(&batch);
+
+        for (tc, (_id, output)) in result.tool_calls.iter().zip(results.iter()) {
+            print_tool_result(output);
+            history.push(Message::tool_result(tc.id.clone(), output.clone()));
         }
 
         if iteration == MAX_ITERATIONS - 1 {
@@ -75,13 +97,17 @@ pub async fn run_agent_turn(
     Ok(())
 }
 
+fn is_read_only(name: &str) -> bool {
+    matches!(name, "read_file" | "list_files" | "grep" | "glob")
+}
+
 fn print_tool_call(name: &str, args: &str) {
     let display_args = if args.len() > 200 {
         format!("{}...", &args[..197])
     } else {
         args.to_string()
     };
-    eprintln!("\n  [tool] {name}({display_args})");
+    eprintln!("  [tool] {name}({display_args})");
 }
 
 fn print_tool_result(result: &str) {

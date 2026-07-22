@@ -40,6 +40,9 @@ impl Tool for ReadFileTool {
         let content = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read {path}: {e}"))?;
 
+        // Track file for staleness detection
+        super::edit_file::track_read(&path);
+
         let numbered: String = content
             .lines()
             .enumerate()

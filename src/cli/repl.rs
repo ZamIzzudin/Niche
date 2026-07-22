@@ -2,7 +2,7 @@ use super::commands::{handle_slash_command, CommandResult};
 use super::file_ref::expand_file_refs;
 use crate::core::agent::run_agent_turn;
 use crate::core::client::Client;
-use crate::core::tools::{read_file::ReadFileTool, list_files::ListFilesTool, run_command::RunCommandTool, write_file::WriteFileTool, ToolRegistry};
+use crate::core::tools::{read_file::ReadFileTool, list_files::ListFilesTool, run_command::RunCommandTool, write_file::WriteFileTool, edit_file::EditFileTool, grep::GrepTool, glob_tool::GlobTool, ToolRegistry};
 use crate::core::types::Message;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -12,14 +12,15 @@ const HISTORY_FILE: &str = ".niche_history";
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are Niche, an intelligent coding assistant. You help users with software development tasks including writing, reviewing, refactoring, and debugging code.
 
-You have access to tools: read_file, write_file, list_files, run_command.
+You have access to tools: read_file, write_file, edit_file, list_files, grep, glob, run_command.
 
 Rules:
 1. Always read a file before editing it - never guess its contents.
-2. Use list_files to explore project structure before assuming paths.
-3. Be concise in explanations. Show the result, not the process.
-4. When a task requires file changes, use write_file to make them directly.
-5. When uncertain, ask for clarification rather than guessing.";
+2. Use list_files to explore project structure, and grep/glob to find specific files or patterns.
+3. Prefer edit_file over write_file for modifying existing files - it is safer and more precise.
+4. For edit_file, provide old_text that appears exactly once in the file. If it appears multiple times, include more surrounding context to make it unique.
+5. Be concise in explanations. Show the result, not the process.
+6. When uncertain, ask for clarification rather than guessing.";
 
 pub struct Repl {
     client: Client,
@@ -36,7 +37,10 @@ impl Repl {
         let mut tools = ToolRegistry::new();
         tools.register(Box::new(ReadFileTool));
         tools.register(Box::new(WriteFileTool));
+        tools.register(Box::new(EditFileTool));
         tools.register(Box::new(ListFilesTool));
+        tools.register(Box::new(GrepTool));
+        tools.register(Box::new(GlobTool));
         tools.register(Box::new(RunCommandTool));
 
         let mut rl = DefaultEditor::new().unwrap_or_else(|e| {
@@ -158,7 +162,7 @@ impl Repl {
 
     fn print_banner(&self) {
         println!("niche v{} - Agentic REPL", env!("CARGO_PKG_VERSION"));
-        println!("Tools: read_file, write_file, list_files, run_command");
+        println!("Tools: read_file, write_file, edit_file, list_files, grep, glob, run_command");
         println!("Type /help for commands. Ctrl+D or /exit to quit.");
         println!();
     }
